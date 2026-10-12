@@ -3,7 +3,8 @@ import { SearchParams, SearchResponse, RoundtripRoute } from '@/lib/flight/types
 import { flightSearchService } from '@/lib/flight/search-service';
 import { flightDataService } from '@/lib/flight/data-service';
 import { FlightService } from '@/services/flight';
-import { getCachedMtime } from '@/lib/flight/flight-loader';
+import { getCachedMtime, getFlightDataQuality } from '@/lib/flight/flight-loader';
+import { searchAnyDestinations } from '@/lib/flight/exploration-search';
 
 // 机场名 → 城市映射；和 loader/data-service 共用同一份 csv mtime 做版本检测
 let airportCityMap: { [key: string]: string } = {};
@@ -42,31 +43,109 @@ export async function POST(request: NextRequest) {
 
     // 解析请求参数
     const body = await request.json();
-    
+    let originCity = body.origin_city;
+    let destCity = body.dest_city;
+    let originAirport: string | null = null;
+    let destAirport: string | null = null;
+    if (airportCityMap[originCity]) {
+      originAirport = originCity;
+      originCity = airportCityMap[originCity];
+    }
+    if (airportCityMap[destCity]) {
+      destAirport = destCity;
+      destCity = airportCityMap[destCity];
+    }
+
+    if (body.search_mode === 'any') {
+      if (!body.origin_city || !body.date) {
+        return NextResponse.json({ error: '任意目的地搜索需要出发城市和日期' }, { status: 400 });
+      }
+      const dateMode = body.date_mode ?? 'weekends';
+      const tripType = body.trip_type ?? 'roundtrip';
+      const version = body.version ?? '666';
+      const windows = body.windows ?? ['early', 'late'];
+      const weekendCount = Number(body.weekend_count ?? 2);
+      const isDate = (value: unknown): value is string => {
+        if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+        const parsed = new Date(`${value}T00:00:00.000Z`);
+        return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+      };
+      if (!isDate(body.date) || (body.date_end && !isDate(body.date_end))) {
+        return NextResponse.json({ error: '日期格式必须为 YYYY-MM-DD' }, { status: 400 });
+      }
+      if (!['date', 'range', 'weekends'].includes(dateMode) || !['oneway', 'roundtrip'].includes(tripType)) {
+        return NextResponse.json({ error: '无效的搜索范围或行程类型' }, { status: 400 });
+      }
+      if (!['666', '2666'].includes(version) || !Array.isArray(windows) ||
+          windows.some((window: string) => !['early', 'late'].includes(window))) {
+        return NextResponse.json({ error: '无效的会员版本或时间窗口' }, { status: 400 });
+      }
+      if (dateMode === 'range') {
+        const endDate = body.date_end;
+        const rangeLength = endDate
+          ? Math.round((Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${body.date}T00:00:00Z`)) / 86_400_000)
+          : -1;
+        if (!endDate || rangeLength < 0 || rangeLength > 90 || tripType !== 'oneway') {
+          return NextResponse.json({ error: '日期范围需在 0-90 天内，且范围搜索仅支持单程' }, { status: 400 });
+        }
+      }
+      if (dateMode === 'weekends' && ![2, 4, 8].includes(weekendCount)) {
+        return NextResponse.json({ error: '未来周末数量仅支持 2、4 或 8 个' }, { status: 400 });
+      }
+      if (tripType === 'roundtrip' && dateMode !== 'weekends') {
+        return NextResponse.json({ error: '自动往返搜索仅支持未来周末模式' }, { status: 400 });
+      }
+
+      const searchParams = {
+        origin_city: originCity,
+        origin_airport: originAirport ?? undefined,
+        date: body.date,
+        date_end: body.date_end,
+        date_mode: dateMode as 'date' | 'range' | 'weekends',
+        weekend_count: weekendCount as 2 | 4 | 8,
+        trip_type: tripType as 'oneway' | 'roundtrip',
+        version: version as '666' | '2666',
+        windows: windows as ('early' | 'late')[],
+        direct_only: tripType === 'roundtrip' ? true : body.direct_only !== false,
+      };
+      const result = searchAnyDestinations(
+        flightDataService.getAllFlights(),
+        searchParams,
+        (origin, destination, date, requestedWindows, requestedVersion) =>
+          flightSearchService.searchFlights({
+            origin_city: origin,
+            dest_city: destination,
+            date,
+            windows: requestedWindows,
+            max_stops: 2,
+            version: requestedVersion,
+          }).routes,
+      );
+      const dataQuality = getFlightDataQuality();
+      if (!dataQuality) throw new Error('航班数据质量状态不可用');
+      const destinationCount = new Set(result.itineraries.map((item) => item.destination_city)).size;
+
+      return NextResponse.json({
+        itineraries: result.itineraries,
+        meta: {
+          count: result.itineraries.length,
+          destinationCount,
+          trip_type: tripType,
+          restriction: result.restriction,
+          requestedDates: result.requestedDates,
+          uncoveredDates: result.uncoveredDates,
+          dataPeriod: result.dataPeriod,
+          dataQuality,
+        },
+      });
+    }
+
     // 验证必需参数
     if (!body.origin_city || !body.dest_city || !body.date) {
       return NextResponse.json(
         { error: '缺少必需参数：origin_city, dest_city, date' },
         { status: 400 }
       );
-    }
-    
-    // 处理机场选择：如果输入的是机场名，转换为城市名
-    let originCity = body.origin_city;
-    let destCity = body.dest_city;
-    let originAirport = null;
-    let destAirport = null;
-    
-    // 检查起点是否是机场
-    if (airportCityMap[originCity]) {
-      originAirport = originCity;
-      originCity = airportCityMap[originCity];
-    }
-    
-    // 检查终点是否是机场
-    if (airportCityMap[destCity]) {
-      destAirport = destCity;
-      destCity = airportCityMap[destCity];
     }
 
     // 构建搜索参数

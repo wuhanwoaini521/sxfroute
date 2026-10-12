@@ -36,6 +36,7 @@ export interface Segment {
   dep_time: string;      // 格式化的起飞时间 "YYYY-MM-DD HH:mm"
   arr_time: string;      // 格式化的到达时间 "YYYY-MM-DD HH:mm"
   plus_day: number;      // 起飞日相对查询日的偏移（0/1/2）
+  product?: string;
 }
 
 // 路线信息（完整的航线）
@@ -77,6 +78,60 @@ export interface SearchResponse {
     count: number;
     restriction?: string;  // 限制信息（如日期限制）
     trip_type?: 'oneway' | 'roundtrip';  // 返回的行程类型
+  };
+}
+
+export type DestinationDateMode = 'date' | 'range' | 'weekends';
+
+export interface DestinationSearchParams {
+  origin_city: string;
+  destination_city?: string;
+  origin_airport?: string;
+  date: string;
+  date_end?: string;
+  date_mode: DestinationDateMode;
+  weekend_count?: 2 | 4 | 8;
+  trip_type: 'oneway' | 'roundtrip';
+  version: '666' | '2666';
+  windows: ('early' | 'late')[];
+  direct_only: boolean;
+}
+
+export interface DestinationItinerary {
+  weekend_start?: string;
+  destination_city: string;
+  outbound: Route;
+  return?: Route;
+  playable_minutes?: number;
+  return_status: 'matched' | 'not-found' | 'not-requested';
+  direct: boolean;
+  qualifies_666: boolean;
+  ticket_inventory: 'unverified';
+}
+
+export interface FlightDataQuality {
+  totalRecords: number;
+  validRecords: number;
+  invalidRecords: number;
+  duplicateRecords: number;
+  warnings: string[];
+  stale: boolean;
+  staleReason?: string;
+  snapshotUpdatedAt: string | null;
+  source: string;
+}
+
+export interface DestinationSearchResponse {
+  itineraries: DestinationItinerary[];
+  meta: {
+    count: number;
+    destinationCount: number;
+    trip_type: 'oneway' | 'roundtrip';
+    restriction?: string;
+    requestedDates: string[];
+    uncoveredDates: string[];
+    dataPeriod: { start: string; end: string };
+    dataQuality: FlightDataQuality;
   };
 }
 

@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { parse } from 'csv-parse/sync';
+import csvParser from './csv-parser.cjs';
 import { Flight } from './types';
 import type { FlightData } from '@/types/flight';
 import {
@@ -14,11 +14,23 @@ import {
 } from './utils';
 
 const CSV_PATH = path.join(process.cwd(), 'data', 'airport.csv');
+const { parse } = csvParser;
 
 interface CacheBundle {
   mtimeMs: number;
   rawFlights: Flight[];
   flightData: FlightData[];
+  quality: {
+    totalRecords: number;
+    validRecords: number;
+    invalidRecords: number;
+    duplicateRecords: number;
+    warnings: string[];
+    stale: boolean;
+    staleReason?: string;
+    snapshotUpdatedAt: string;
+    source: string;
+  };
 }
 
 let cache: CacheBundle | null = null;
@@ -29,6 +41,16 @@ let lastFailedMtime = 0;
 async function statMtime(): Promise<number> {
   const stats = await fs.stat(CSV_PATH);
   return stats.mtimeMs;
+}
+
+function isValidDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function isValidTime(value: string): boolean {
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value) || /^(?:[01]\d|2[0-3])[0-5]\d$/.test(value);
 }
 
 async function readAndParse(mtimeMs: number): Promise<CacheBundle> {
@@ -46,10 +68,32 @@ async function readAndParse(mtimeMs: number): Promise<CacheBundle> {
     trim: true,
   }) as Record<string, string>[];
 
+  const headers = Object.keys(records[0] ?? {});
+  const requiredHeaderAliases = [
+    ['航班号'], ['航空公司'], ['出港城市', '起飞城市'], ['到港城市', '降落城市'],
+    ['出发时刻', '出港时刻'], ['降落时刻', '降落时间'], ['班期'],
+    ['起飞机场IATA代码'], ['降落机场IATA代码'],
+  ];
+  const missingHeaders = requiredHeaderAliases
+    .filter((aliases) => !aliases.some((alias) => headers.includes(alias)))
+    .map((aliases) => aliases[0]);
+  if (missingHeaders.length > 0) {
+    throw new Error(`CSV 缺少必需字段：${missingHeaders.join('、')}`);
+  }
+
   const rawFlights: Flight[] = [];
   const cityPairMap = new Map<string, boolean>();
+  const seenRecords = new Set<string>();
+  let invalidRecords = 0;
+  let duplicateRecords = 0;
 
   for (const record of records) {
+    const recordKey = JSON.stringify(record);
+    if (seenRecords.has(recordKey)) {
+      duplicateRecords++;
+      continue;
+    }
+    seenRecords.add(recordKey);
     const carrier_name = getCsvField(record, ['航空公司']);
     const flight_no = getCsvField(record, ['航班号']);
     const week_str = getCsvField(record, ['班期']);
@@ -81,7 +125,21 @@ async function readAndParse(mtimeMs: number): Promise<CacheBundle> {
     const dep_str = getCsvField(record, ['出发时刻', '出港时刻']);
     const arr_str = getCsvField(record, ['降落时刻', '降落时间']);
 
-    if (!flight_no || !carrier_name) continue;
+    const datesAreValid = [valid_from, valid_to].every((value) => !value || isValidDate(value));
+    const operatingDatesAreValid = (operating_dates ?? []).every(isValidDate);
+    const scheduleIsValid = /^([1-7])+$/.test(week_str) && new Set(week_str).size === week_str.length;
+    const rowIsValid = Boolean(
+      flight_no && /^[A-Z0-9]{3,8}$/i.test(flight_no) &&
+      carrier_name && origin_city && dest_city && origin_airport && dest_airport &&
+      /^[A-Z]{3}$/i.test(origin_iata_code) && /^[A-Z]{3}$/i.test(dest_iata_code) &&
+      isValidTime(dep_str) && isValidTime(arr_str) && scheduleIsValid &&
+      datesAreValid && operatingDatesAreValid &&
+      (!valid_from || !valid_to || valid_from <= valid_to)
+    );
+    if (!rowIsValid) {
+      invalidRecords++;
+      continue;
+    }
 
     const dep_minutes = timeToMinutes(dep_str);
     const arr_minutes = timeToMinutes(arr_str);
@@ -145,7 +203,25 @@ async function readAndParse(mtimeMs: number): Promise<CacheBundle> {
     hasReturn: cityPairMap.has(`${f.dest_city}-${f.origin_city}`),
   }));
 
-  return { mtimeMs, rawFlights, flightData };
+  const warnings: string[] = [];
+  if (invalidRecords > 0) warnings.push(`${invalidRecords} 条格式错误的 CSV 记录已跳过`);
+  if (duplicateRecords > 0) warnings.push(`${duplicateRecords} 条完全重复的 CSV 记录已去重`);
+
+  return {
+    mtimeMs,
+    rawFlights,
+    flightData,
+    quality: {
+      totalRecords: records.length,
+      validRecords: rawFlights.length,
+      invalidRecords,
+      duplicateRecords,
+      warnings,
+      stale: false,
+      snapshotUpdatedAt: new Date(mtimeMs).toISOString(),
+      source: 'data/airport.csv（仓库随附的公开航班计划历史快照；非实时、非官方）',
+    },
+  };
 }
 
 // 并发安全：所有并发调用共享同一个 pendingReload Promise
@@ -161,7 +237,17 @@ async function ensureLoaded(): Promise<CacheBundle> {
     current = await statMtime();
   } catch (error) {
     if (cache) {
+      const staleReason = error instanceof Error ? error.message : String(error);
       console.warn('[flight-loader] 无法获取 csv mtime，沿用上一份缓存:', error);
+      cache = {
+        ...cache,
+        quality: {
+          ...cache.quality,
+          warnings: [...cache.quality.warnings, '无法确认 CSV 是否更新，当前使用上一次成功加载的数据'],
+          stale: true,
+          staleReason,
+        },
+      };
       return cache;
     }
     throw error;
@@ -187,7 +273,17 @@ async function ensureLoaded(): Promise<CacheBundle> {
     .catch((error): CacheBundle => {
       if (cache) {
         lastFailedMtime = current;
+        const staleReason = error instanceof Error ? error.message : String(error);
         console.error(`[flight-loader] 解析失败（mtime=${current}），沿用上一份缓存:`, error);
+        cache = {
+          ...cache,
+          quality: {
+            ...cache.quality,
+            warnings: [...cache.quality.warnings, '新 CSV 无法解析，当前使用上一次成功加载的数据'],
+            stale: true,
+            staleReason,
+          },
+        };
         return cache;
       }
       throw error;
@@ -213,4 +309,9 @@ export async function loadFlightData(): Promise<FlightData[]> {
 // 用于让 data-service / flight-cache 在不重复 stat 的前提下判断是否需要重建衍生状态
 export function getCachedMtime(): number {
   return cache?.mtimeMs ?? 0;
+}
+
+export function getFlightDataQuality() {
+  if (!cache) return null;
+  return { ...cache.quality, warnings: [...cache.quality.warnings] };
 }

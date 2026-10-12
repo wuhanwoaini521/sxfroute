@@ -26,8 +26,9 @@
   "scripts": {
     "dev": "cross-env NODE_NO_WARNINGS=1 next dev",
     "build": "next build",
-    "start": "NODE_NO_WARNINGS=1 next start",
-    "lint": "next lint"
+    "start": "cross-env NODE_NO_WARNINGS=1 next start",
+    "lint": "next lint",
+    "test:flight": "node --test tests/flight-exploration.test.cjs"
   },
   "dependencies": {
     "@amap/amap-jsapi-loader": "^1.0.1",

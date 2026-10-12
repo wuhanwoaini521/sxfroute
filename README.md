@@ -22,8 +22,10 @@
 
 ## ✨ 功能特性
 
-- **航班搜索**：支持单程 / 往返搜索，智能筛选夜航和凌晨航班
-- **航线地图**：基于高德地图 JS API 的航线可视化
+- **任意目的地探索**：默认只需选择出发城市，即遍历数据覆盖期内全部符合条件的目的地；支持直飞筛选和日期范围
+- **周末往返匹配**：按未来 2 / 4 / 8 个周末匹配周五/周六去程、周日/周一返程；去返程均直飞并按会员起飞时段筛选
+- **指定航线查询**：继续支持原有精确出发地/目的地、单程/往返和中转搜索
+- **航线地图**：任意目的地结果提供无需地图 Key 的航线分布图；指定路线沿用高德地图 JS API
 - **航班数据表**：全量航班历史快照浏览，支持筛选、排序
 - **航班统计**：按出港城市、机场维度的统计面板
 - **中英双语**：基于 `next-intl` 的中英界面切换
@@ -81,23 +83,33 @@ docker run -d \
 
 ### 方式 2：本地开发
 
-```bash
-# 1. 克隆
+前置条件：Node.js 22 LTS、Corepack 与 pnpm 9.15.9。无需申请海航账号；地图 Key 可选（指定航线的高德地图视图需要，任意目的地地图不需要）。
+
+#### Windows（PowerShell）
+
+```powershell
 git clone https://github.com/yixinmeng/sxfroute.git
-cd sxfroute
-
-# 2. 安装依赖
-pnpm install
-
-# 3. 配置环境变量
-cp .env.example .env.local
-# 编辑 .env.local 填入你自己的高德 key
-
-# 4. 启动开发服务器
+Set-Location sxfroute
+corepack enable
+pnpm install --frozen-lockfile
+Copy-Item .env.example .env.local
+# 可选：编辑 .env.local 填入高德地图 Key
 pnpm dev
 ```
 
-访问 http://localhost:3000 。
+#### macOS
+
+```bash
+git clone https://github.com/yixinmeng/sxfroute.git
+cd sxfroute
+corepack enable
+pnpm install --frozen-lockfile
+cp .env.example .env.local
+# 可选：编辑 .env.local 填入高德地图 Key
+pnpm dev
+```
+
+访问 <http://localhost:3000>。修改 `data/airport.csv` 后无需重启；服务按文件更新时间重新加载并报告数据质量。
 
 ## ⚙️ 环境变量
 
@@ -105,8 +117,8 @@ pnpm dev
 
 | 变量 | 推荐？ | 说明 | 不设的影响 |
 |---|:---:|---|---|
-| `NEXT_PUBLIC_AMAP_KEY` | ✅ 推荐 | 高德地图 JS API Key | 地图视图、城市搜索优雅降级；航班表 / 筛选 / 统计正常 |
-| `NEXT_PUBLIC_AMAP_SECURITY_CODE` | ✅ 推荐 | 高德地图安全密钥 | 同上 |
+| `NEXT_PUBLIC_AMAP_KEY` | ❌ 可选 | 高德地图 JS API Key | 任意目的地结果使用内置坐标示意图；指定航线的高德地图视图不可用 |
+| `NEXT_PUBLIC_AMAP_SECURITY_CODE` | ❌ 可选 | 高德地图安全密钥 | 同上 |
 | `NEXT_PUBLIC_WEB_URL` | ❌ 可选 | 公开站点 URL（仅 SEO 用） | sitemap 为空、canonical 走相对路径、JSON-LD 不输出。仅当你把这个项目作为**对外公开站点**部署时再设置 |
 
 ## 🗺️ 如何申请高德地图 Key（约 3 分钟）
@@ -154,6 +166,26 @@ data/             # 航班数据 CSV（可热更新，详见 DATA.md）
 - **本地开发**：`pnpm dev` 下直接改 `data/airport.csv`，同样即时生效。
 
 字段格式与解析规则见 [DATA.md](./DATA.md)。
+
+## 🧪 测试与数据说明
+
+```bash
+pnpm test:flight
+pnpm lint
+pnpm build
+```
+
+Playwright 浏览器回归（需要 Python 3 与 Playwright Chromium）：
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+python scripts/e2e-search.py --url http://localhost:3000
+```
+
+端到端脚本会校验首页、任意目的地/周末往返、城市结果、列表/地图切换、日期重搜、移动端宽度与 Console/网络错误，并写入 `docs/screenshots/`。使用 `--headed` 可打开真实浏览器窗口。
+
+任意目的地结果的航班计划来自 CSV 快照；文件更新时间根据 `data/airport.csv` 的 mtime 记录，不代表上游航司发布时间。`199 元会员权益票` 实时库存始终标注“未核实”，不会由航班计划推断。
 
 ## 🤝 贡献
 

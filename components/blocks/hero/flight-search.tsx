@@ -11,9 +11,9 @@ import { Badge } from "@/components/ui/badge"
 import { CitySelector } from "./city-selector"
 import { FlightStats } from "./flight-stats"
 import { SearchResults } from "./search-results"
+import { AnyDestinationResults } from "./any-destination-results"
 import { Disclaimer } from "./disclaimer"
-import { Route, RoundtripRoute } from "@/lib/flight/types"
-import { FLIGHT_DATA_PERIOD } from "@/lib/flight/data-period"
+import { DestinationItinerary, DestinationSearchResponse, Route, RoundtripRoute } from "@/lib/flight/types"
 
 interface SearchParams {
   origin_city: string
@@ -25,6 +25,7 @@ interface SearchParams {
   trip_type: "oneway" | "roundtrip"  // 新增：行程类型
   return_date?: string               // 新增：返程日期
   return_windows?: string[]          // 新增：返程时间窗口
+  direct_only?: boolean
 }
 
 function getDefaultDate() {
@@ -34,20 +35,26 @@ function getDefaultDate() {
     String(today.getMonth() + 1).padStart(2, "0"),
     String(today.getDate()).padStart(2, "0"),
   ].join("-");
-  return todayText >= FLIGHT_DATA_PERIOD.start && todayText <= FLIGHT_DATA_PERIOD.end
-    ? todayText
-    : FLIGHT_DATA_PERIOD.start;
+  return todayText;
 }
 
 export function FlightSearch() {
+  const [searchMode, setSearchMode] = useState<'any' | 'precise'>('any')
+  const [searchModeAtSearch, setSearchModeAtSearch] = useState<'any' | 'precise'>('any')
+  const [dateMode, setDateMode] = useState<'date' | 'range' | 'weekends'>('weekends')
+  const [weekendCount, setWeekendCount] = useState<2 | 4 | 8>(2)
+  const [dateEnd, setDateEnd] = useState('')
+  const [anyItineraries, setAnyItineraries] = useState<DestinationItinerary[]>([])
+  const [anyMeta, setAnyMeta] = useState<DestinationSearchResponse['meta'] | undefined>(undefined)
   const [searchParams, setSearchParams] = useState<SearchParams>({
     origin_city: "",
     dest_city: "",
     date: getDefaultDate(),
     windows: ["early", "late"],
-    max_stops: 1,
+    max_stops: 0,
     version: "666",
-    trip_type: "oneway",
+    trip_type: "roundtrip",
+    direct_only: true,
     return_date: "",
     return_windows: ["early", "late"],
   })
@@ -56,7 +63,7 @@ export function FlightSearch() {
   const [roundtripRoutes, setRoundtripRoutes] = useState<RoundtripRoute[]>([])
   const [searched, setSearched] = useState(false)
   const [restriction, setRestriction] = useState<string | undefined>(undefined)
-  const [searchTripType, setSearchTripType] = useState<'oneway' | 'roundtrip'>('oneway')
+  const [searchTripType, setSearchTripType] = useState<'oneway' | 'roundtrip'>('roundtrip')
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   const toggleWindowField = (field: 'windows' | 'return_windows', value: string) => {
@@ -72,50 +79,64 @@ export function FlightSearch() {
   const toggleWindow = (window: string) => toggleWindowField('windows', window)
 
   const handleSearch = async () => {
-    if (!searchParams.origin_city || !searchParams.dest_city || !searchParams.date) {
-      return
-    }
-    
-    // 往返模式需要返程日期
-    if (searchParams.trip_type === 'roundtrip' && !searchParams.return_date) {
+    if (!searchParams.origin_city || !searchParams.date || (searchMode === 'precise' && !searchParams.dest_city)) return
+    if (searchMode === 'any' && dateMode === 'range' && !dateEnd) return
+    if (searchMode === 'precise' && searchParams.trip_type === 'roundtrip' && !searchParams.return_date) {
       alert('请选择返程日期')
       return
     }
-    
+
     setLoading(true)
     setSearched(true)
+    setSearchModeAtSearch(searchMode)
     setSearchTripType(searchParams.trip_type)
 
     try {
+      const requestBody = searchMode === 'any'
+        ? {
+            ...searchParams,
+            search_mode: 'any',
+            date_mode: dateMode,
+            date_end: dateMode === 'range' ? dateEnd : undefined,
+            weekend_count: weekendCount,
+            direct_only: searchParams.trip_type === 'roundtrip' ? true : searchParams.direct_only,
+          }
+        : searchParams
       const response = await fetch('/api/search', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(searchParams),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
       })
-
       if (!response.ok) {
-        throw new Error('搜索失败')
+        const errorBody = await response.json().catch(() => undefined)
+        throw new Error(errorBody?.error || '搜索失败')
       }
 
       const data = await response.json()
-      
-      // 根据响应类型设置数据
-      if (data.meta?.trip_type === 'roundtrip') {
+      if (searchMode === 'any') {
+        setAnyItineraries(data.itineraries || [])
+        setAnyMeta(data.meta)
+        setRoutes([])
+        setRoundtripRoutes([])
+      } else if (data.meta?.trip_type === 'roundtrip') {
         setRoundtripRoutes(data.roundtrip_routes || [])
         setRoutes([])
+        setAnyItineraries([])
+        setAnyMeta(undefined)
       } else {
         setRoutes(data.routes || [])
         setRoundtripRoutes([])
+        setAnyItineraries([])
+        setAnyMeta(undefined)
       }
-      
       setRestriction(data.meta?.restriction)
     } catch (error) {
       console.error('搜索出错:', error)
       setRoutes([])
       setRoundtripRoutes([])
-      setRestriction(undefined)
+      setAnyItineraries([])
+      setAnyMeta(undefined)
+      setRestriction(error instanceof Error ? error.message : '搜索失败')
     } finally {
       setLoading(false)
     }
@@ -141,138 +162,108 @@ export function FlightSearch() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 sm:space-y-6">
-            {/* 行程类型选择 */}
-            <div className="flex gap-1 p-0.5 bg-gray-100 rounded-lg">
-              <Button
-                type="button"
-                variant="ghost"
-                className={`flex-1 h-9 text-sm flex items-center justify-center transition-all duration-200 ${
-                  searchParams.trip_type === "oneway" 
-                    ? "bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md hover:from-orange-600 hover:to-amber-600 font-medium" 
-                    : "bg-transparent hover:bg-gray-50 text-gray-600 hover:text-gray-800"
-                }`}
-                onClick={() => setSearchParams(prev => ({ 
-                  ...prev, 
-                  trip_type: "oneway",
-                  max_stops: 1  // 单程默认恢复为最多1次中转
-                }))}
-              >
-                <Plane className={`w-4 h-4 mr-1.5 flex-shrink-0 transition-transform duration-200 ${
-                  searchParams.trip_type === "oneway" ? "scale-110" : ""
-                }`} />
-                <span>单程</span>
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1" role="group" aria-label="搜索模式">
+              <Button type="button" variant={searchMode === "any" ? "default" : "ghost"} aria-pressed={searchMode === "any"} onClick={() => setSearchMode("any")} className={searchMode === "any" ? "bg-sky-700 text-white hover:bg-sky-800" : "text-slate-700"}>
+                目的地：任意
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className={`flex-1 h-9 text-sm flex items-center justify-center transition-all duration-200 ${
-                  searchParams.trip_type === "roundtrip" 
-                    ? "bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md hover:from-orange-600 hover:to-amber-600 font-medium" 
-                    : "bg-transparent hover:bg-gray-50 text-gray-600 hover:text-gray-800"
-                }`}
-                onClick={() => setSearchParams(prev => ({ 
-                  ...prev, 
-                  trip_type: "roundtrip",
-                  return_date: prev.return_date || prev.date,
-                  max_stops: 0  // 往返默认设置为直飞
-                }))}
-              >
-                <ArrowLeftRight className={`w-4 h-4 mr-1.5 flex-shrink-0 transition-transform duration-200 ${
-                  searchParams.trip_type === "roundtrip" ? "scale-110" : ""
-                }`} />
-                <span>往返</span>
+              <Button type="button" variant={searchMode === "precise" ? "default" : "ghost"} aria-pressed={searchMode === "precise"} onClick={() => setSearchMode("precise")} className={searchMode === "precise" ? "bg-sky-700 text-white hover:bg-sky-800" : "text-slate-700"}>
+                指定目的地
               </Button>
             </div>
-            {/* 移动端水平布局 */}
-            <div className="block sm:hidden">
-              <Label className="text-xs mb-2 block">选择城市</Label>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <CitySelector
-                    value={searchParams.origin_city}
-                    onChange={(value) => setSearchParams((prev) => ({ ...prev, origin_city: value }))}
-                    placeholder="出发城市"
-                  />
-                </div>
-                
-                <Button
-                  type="button"
-                  onClick={handleSwapCities}
-                  disabled={!searchParams.origin_city || !searchParams.dest_city}
-                  className="p-1.5 h-8 w-8 rounded-full hover:bg-gray-100 disabled:opacity-50 transition-all"
-                  variant="ghost"
-                >
-                  <ArrowLeftRight className="h-4 w-4 text-sky-500" />
-                </Button>
 
-                <div className="flex-1">
-                  <CitySelector
-                    value={searchParams.dest_city}
-                    onChange={(value) => setSearchParams((prev) => ({ ...prev, dest_city: value }))}
-                    placeholder="到达城市"
-                  />
+            <div className="flex gap-1 rounded-lg bg-gray-100 p-0.5">
+              <Button type="button" variant="ghost" aria-pressed={searchParams.trip_type === "oneway"} className={`flex-1 h-9 text-sm ${searchParams.trip_type === "oneway" ? "bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md font-medium" : "text-gray-600"}`} onClick={() => setSearchParams((prev) => ({ ...prev, trip_type: "oneway", max_stops: searchMode === "precise" ? 1 : 0 }))}>
+                <Plane className="mr-1.5 h-4 w-4" aria-hidden="true" />单程
+              </Button>
+              <Button type="button" variant="ghost" aria-pressed={searchParams.trip_type === "roundtrip"} className={`flex-1 h-9 text-sm ${searchParams.trip_type === "roundtrip" ? "bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md font-medium" : "text-gray-600"}`} onClick={() => {
+                setSearchParams((prev) => ({ ...prev, trip_type: "roundtrip", return_date: prev.return_date || prev.date, max_stops: 0, direct_only: true }))
+                if (searchMode === "any") setDateMode("weekends")
+              }}>
+                <ArrowLeftRight className="mr-1.5 h-4 w-4" aria-hidden="true" />{searchMode === "any" ? "周末往返" : "往返"}
+              </Button>
+            </div>
+
+            <div className="space-y-1 sm:space-y-2">
+              <Label className="text-xs sm:text-sm">{searchMode === "any" ? "出发城市" : "选择城市"}</Label>
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <CitySelector value={searchParams.origin_city} onChange={(value) => setSearchParams((prev) => ({ ...prev, origin_city: value }))} placeholder="出发城市" />
                 </div>
+                {searchMode === "any" ? (
+                  <div className="flex min-h-10 flex-1 items-center justify-center gap-2 rounded-md border border-dashed border-sky-300 bg-sky-50 px-2 text-sm text-sky-900" aria-label="目的地：任意">
+                    <span>目的地</span><Badge className="bg-sky-700">任意</Badge>
+                  </div>
+                ) : (
+                  <>
+                    <Button type="button" onClick={handleSwapCities} disabled={!searchParams.origin_city || !searchParams.dest_city} className="h-10 w-10 flex-shrink-0 rounded-full" variant="ghost" aria-label="交换出发地和目的地">
+                      <ArrowLeftRight className="h-4 w-4 text-sky-600" aria-hidden="true" />
+                    </Button>
+                    <div className="min-w-0 flex-1">
+                      <CitySelector value={searchParams.dest_city} onChange={(value) => setSearchParams((prev) => ({ ...prev, dest_city: value }))} placeholder="到达城市" />
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
-            {/* 桌面端水平布局 */}
-            <div className="hidden sm:block">
-              <Label className="text-xs sm:text-sm mb-2 block">选择城市</Label>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <CitySelector
-                    value={searchParams.origin_city}
-                    onChange={(value) => setSearchParams((prev) => ({ ...prev, origin_city: value }))}
-                    placeholder="出发城市"
-                  />
+              {searchMode === "any" && (
+                <div className="space-y-1 sm:space-y-2">
+                  <Label className="text-xs sm:text-sm">日期范围</Label>
+                  <Select value={dateMode} onValueChange={(value: "date" | "range" | "weekends") => {
+                    setDateMode(value)
+                    setSearchParams((prev) => ({ ...prev, trip_type: value === "weekends" ? "roundtrip" : "oneway", direct_only: true }))
+                  }}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="weekends">未来周末往返</SelectItem>
+                      <SelectItem value="date">指定日期</SelectItem>
+                      <SelectItem value="range">日期范围</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {dateMode === "weekends" && (
+                    <div className="space-y-1">
+                      <Label className="text-xs text-slate-600">未来周末数量</Label>
+                      <Select value={String(weekendCount)} onValueChange={(value) => setWeekendCount(Number(value) as 2 | 4 | 8)}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="2">未来 2 个周末</SelectItem>
+                          <SelectItem value="4">未来 4 个周末</SelectItem>
+                          <SelectItem value="8">未来 8 个周末</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
-                
-                <Button
-                  type="button"
-                  onClick={handleSwapCities}
-                  disabled={!searchParams.origin_city || !searchParams.dest_city}
-                  className="p-2 h-10 w-10 rounded-full bg-white border border-gray-200 hover:border-sky-400 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow-md transition-all duration-200 group flex-shrink-0"
-                >
-                  <ArrowLeftRight className="h-5 w-5 text-gray-500 group-hover:text-sky-600 transition-colors duration-200" />
-                </Button>
-
-                <div className="flex-1">
-                  <CitySelector
-                    value={searchParams.dest_city}
-                    onChange={(value) => setSearchParams((prev) => ({ ...prev, dest_city: value }))}
-                    placeholder="到达城市"
-                  />
-                </div>
-              </div>
-            </div>
+              )}
 
               <div className="space-y-1 sm:space-y-2">
                 <Label htmlFor="date" className="text-xs sm:text-sm">
-                  {searchParams.trip_type === "roundtrip" ? "去程日期" : "出发日期"}
+                  {searchMode === "any" && dateMode === "weekends" ? "从该日期起探索周末" : searchMode === "any" ? "开始日期" : searchParams.trip_type === "roundtrip" ? "去程日期" : "出发日期"}
                 </Label>
-              <div className="relative w-full max-w-full overflow-hidden rounded-lg border border-transparent">
-                <Calendar className="absolute left-3 top-2.5 sm:top-3 w-4 h-4 text-gray-400 pointer-events-none" />
-                <Input
-                  id="date"
-                  type="date"
-                  value={searchParams.date}
-                  onChange={(e) => setSearchParams((prev) => ({ 
-                    ...prev, 
-                    date: e.target.value,
-                    // 如果返程日期早于去程日期，自动更新返程日期
-                    return_date: prev.return_date && prev.return_date < e.target.value 
-                      ? e.target.value 
-                      : prev.return_date
-                  }))}
-                  className="w-full max-w-full min-w-0 pl-10 text-sm h-9 sm:h-10 cursor-pointer text-left appearance-none [&::-webkit-calendar-picker-indicator]:opacity-0 [&::-webkit-calendar-picker-indicator]:absolute [&::-webkit-calendar-picker-indicator]:inset-0 [&::-webkit-calendar-picker-indicator]:w-full [&::-webkit-calendar-picker-indicator]:h-full [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                  min={FLIGHT_DATA_PERIOD.start}
-                  max={FLIGHT_DATA_PERIOD.end}
-                />
+                <div className="relative w-full max-w-full overflow-hidden rounded-lg border border-transparent">
+                  <Calendar className="absolute left-3 top-2.5 sm:top-3 h-4 w-4 pointer-events-none text-gray-400" aria-hidden="true" />
+                  <Input
+                    id="date"
+                    type="date"
+                    value={searchParams.date}
+                    onChange={(e) => setSearchParams((prev) => ({
+                      ...prev,
+                      date: e.target.value,
+                      return_date: prev.return_date && prev.return_date < e.target.value ? e.target.value : prev.return_date,
+                    }))}
+                    className="h-9 w-full min-w-0 max-w-full cursor-pointer pl-10 text-left text-sm sm:h-10"
+                  />
+                </div>
+                {searchMode === "any" && dateMode === "range" && (
+                  <div className="space-y-1">
+                    <Label htmlFor="date_end" className="text-xs text-slate-600">结束日期</Label>
+                    <Input id="date_end" type="date" value={dateEnd} min={searchParams.date} onChange={(event) => setDateEnd(event.target.value)} />
+                  </div>
+                )}
               </div>
-            </div>
 
-            {/* 返程日期选择器 - 仅在往返模式下显示 */}
-            {searchParams.trip_type === "roundtrip" && (
+            {/* 精确往返搜索的返程日期 */}
+            {searchMode === "precise" && searchParams.trip_type === "roundtrip" && (
               <div className="space-y-1 sm:space-y-2">
                 <Label htmlFor="return_date" className="text-xs sm:text-sm">返程日期</Label>
                 <div className="relative w-full max-w-full overflow-hidden rounded-lg border border-transparent">
@@ -283,8 +274,7 @@ export function FlightSearch() {
                     value={searchParams.return_date}
                     onChange={(e) => setSearchParams((prev) => ({ ...prev, return_date: e.target.value }))}
                     className="w-full max-w-full min-w-0 pl-10 text-sm h-9 sm:h-10 cursor-pointer text-left appearance-none [&::-webkit-calendar-picker-indicator]:opacity-0 [&::-webkit-calendar-picker-indicator]:absolute [&::-webkit-calendar-picker-indicator]:inset-0 [&::-webkit-calendar-picker-indicator]:w-full [&::-webkit-calendar-picker-indicator]:h-full [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                    min={searchParams.date || FLIGHT_DATA_PERIOD.start}
-                    max={FLIGHT_DATA_PERIOD.end}
+                    min={searchParams.date}
                   />
                 </div>
               </div>
@@ -308,25 +298,33 @@ export function FlightSearch() {
               </Select>
             </div>
 
-            {/* 最大中转次数 - 移到外面 */}
-            <div className="space-y-1 sm:space-y-2">
-              <Label className="text-xs sm:text-sm">最大中转次数</Label>
-              <Select
-                value={searchParams.max_stops.toString()}
-                onValueChange={(value) =>
-                  setSearchParams((prev) => ({ ...prev, max_stops: Number.parseInt(value) }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="0">直飞</SelectItem>
-                  <SelectItem value="1">最多1次中转</SelectItem>
-                  <SelectItem value="2">最多2次中转</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {searchMode === "any" ? (
+              <div className="rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                <label className="flex min-h-6 items-center gap-2 text-sm font-medium text-slate-800">
+                  <input
+                    type="checkbox"
+                    checked={searchParams.trip_type === "roundtrip" || searchParams.direct_only !== false}
+                    disabled={searchParams.trip_type === "roundtrip" || dateMode === "weekends"}
+                    onChange={(event) => setSearchParams((prev) => ({ ...prev, direct_only: event.target.checked }))}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  只看直飞
+                </label>
+                <p className="mt-1 text-xs text-slate-500">周末探索去返程均强制直飞；指定日期/范围单程可取消勾选查看中转。</p>
+              </div>
+            ) : (
+              <div className="space-y-1 sm:space-y-2">
+                <Label className="text-xs sm:text-sm">最大中转次数</Label>
+                <Select value={searchParams.max_stops.toString()} onValueChange={(value) => setSearchParams((prev) => ({ ...prev, max_stops: Number.parseInt(value) }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">直飞</SelectItem>
+                    <SelectItem value="1">最多1次中转</SelectItem>
+                    <SelectItem value="2">最多2次中转</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {/* 高级选项折叠区域 */}
             <div className="space-y-3">
@@ -341,7 +339,7 @@ export function FlightSearch() {
                   <span>高级选项</span>
                   {/* 显示当前选中的选项数量 */}
                   {(searchParams.windows.length < 2 || 
-                    (searchParams.trip_type === "roundtrip" && searchParams.return_windows && searchParams.return_windows.length < 2)) && (
+                    (searchMode === "precise" && searchParams.trip_type === "roundtrip" && searchParams.return_windows && searchParams.return_windows.length < 2)) && (
                     <Badge variant="secondary" className="text-xs">
                       已筛选
                     </Badge>
@@ -359,7 +357,7 @@ export function FlightSearch() {
                   {/* 去程时间窗口 */}
                   <div className="space-y-2">
                     <Label className="text-xs sm:text-sm">
-                      {searchParams.trip_type === "roundtrip" ? "去程时间窗口" : "时间窗口"}
+                      {searchParams.trip_type === "roundtrip" ? searchMode === "any" ? "去返程起飞窗口" : "去程时间窗口" : "时间窗口"}
                     </Label>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-1 sm:space-y-2">
                       <div className="flex items-center space-x-2">
@@ -398,7 +396,7 @@ export function FlightSearch() {
                   </div>
 
                   {/* 返程时间窗口 - 仅在往返模式下显示 */}
-                  {searchParams.trip_type === "roundtrip" && (
+                  {searchMode === "precise" && searchParams.trip_type === "roundtrip" && (
                     <div className="space-y-2">
                       <Label className="text-xs sm:text-sm">返程时间窗口</Label>
                       <div className="grid grid-cols-2 gap-2 sm:grid-cols-1 sm:space-y-2">
@@ -445,7 +443,7 @@ export function FlightSearch() {
               onClick={handleSearch}
               className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white shadow-md hover:shadow-lg transition-all"
               type="submit"
-              disabled={loading || !searchParams.origin_city || !searchParams.dest_city || !searchParams.date}
+              disabled={loading || !searchParams.origin_city || !searchParams.date || (searchMode === "precise" && !searchParams.dest_city) || (searchMode === "any" && dateMode === "range" && !dateEnd)}
             >
               {loading ? "搜索中..." : "搜索航班"}
             </Button>
@@ -468,8 +466,8 @@ export function FlightSearch() {
                     1
                   </div>
                   <div className="flex-1 pt-1">
-                    <p className="text-sm font-medium text-gray-800">选择出发和到达城市</p>
-                    <p className="text-xs text-gray-500 mt-0.5">支持全国主要城市</p>
+                    <p className="text-sm font-medium text-gray-800">输入出发城市</p>
+                    <p className="text-xs text-gray-500 mt-0.5">目的地默认任意，无需逐条查询</p>
                   </div>
                 </div>
                 <div className="flex gap-3 items-start">
@@ -501,14 +499,18 @@ export function FlightSearch() {
       <div className="lg:col-span-2">
         <div className="space-y-4">
           {!searched && <FlightStats />}
-          <SearchResults 
-            routes={routes} 
-            loading={loading} 
-            searched={searched}
-            restriction={restriction}
-            roundtripRoutes={roundtripRoutes}
-            tripType={searchTripType}
-          />
+          {searchModeAtSearch === "any" ? (
+            <AnyDestinationResults itineraries={anyItineraries} meta={anyMeta} loading={loading} searched={searched} requestError={anyMeta ? undefined : restriction} />
+          ) : (
+            <SearchResults
+              routes={routes}
+              loading={loading}
+              searched={searched}
+              restriction={restriction}
+              roundtripRoutes={roundtripRoutes}
+              tripType={searchTripType}
+            />
+          )}
           {/* PC端免责声明保持原位置 */}
           {!searched && <div className="hidden sm:block"><Disclaimer /></div>}
         </div>
