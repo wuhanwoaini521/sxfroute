@@ -1,4 +1,5 @@
 import { Flight } from './types';
+import { getFlightDataPeriod } from './data-period';
 import { loadRawFlights, getCachedMtime } from './flight-loader';
 
 type FlightIndex = Map<string, Map<number, Flight[]>>;
@@ -94,6 +95,16 @@ class FlightDataService {
     const provinceIdx = this.provinceIndex.get(origin_province);
     if (!provinceIdx) return [];
     return provinceIdx.get(dayOfWeek) || [];
+  }
+
+  getAllFlights(): Flight[] {
+    this.assertLoaded();
+    return this.flights;
+  }
+
+  getDataPeriod(): { start: string; end: string } {
+    this.assertLoaded();
+    return getFlightDataPeriod(this.flights);
   }
 
   getAllCities(): string[] {

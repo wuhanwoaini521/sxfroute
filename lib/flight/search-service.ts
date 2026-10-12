@@ -16,7 +16,6 @@ import {
   isProductAvailable,
 } from './utils';
 import {
-  FLIGHT_DATA_PERIOD_LABEL,
   RESTRICTED_PERIODS_666,
   isWithinFlightDataPeriod,
 } from './data-period';
@@ -44,11 +43,12 @@ class FlightSearchService {
   // BFS搜索航班路线
   searchFlights(params: SearchParams): { routes: Route[], restriction?: string } {
     const { origin_city, dest_city, date, windows, max_stops, version = '666' } = params;
+    const dataPeriod = flightDataService.getDataPeriod();
 
-    if (!isWithinFlightDataPeriod(date)) {
+    if (!isWithinFlightDataPeriod(date, dataPeriod)) {
       return {
         routes: [],
-        restriction: `当前航班快照仅覆盖${FLIGHT_DATA_PERIOD_LABEL}`,
+        restriction: `当前航班快照仅覆盖${dataPeriod.start} 至 ${dataPeriod.end}`,
       };
     }
     
@@ -152,7 +152,7 @@ class FlightSearchService {
 
         const segmentDateStr = format(addDays(parseISO(date), dayOffset), 'yyyy-MM-dd');
         if (
-          !isWithinFlightDataPeriod(segmentDateStr) ||
+          !isWithinFlightDataPeriod(segmentDateStr, dataPeriod) ||
           !this.isFlightAvailableOnDate(flight, segmentDateStr) ||
           !isProductAvailable(flight.product, version)
         ) {
@@ -286,7 +286,8 @@ class FlightSearchService {
         dest_province: seg.flight.dest_province,
         dep_time: depTime.dateTime,
         arr_time: arrTime.dateTime,
-        plus_day: seg.plus_day
+        plus_day: seg.plus_day,
+        product: seg.flight.product
       });
       
       // 添加中转城市
